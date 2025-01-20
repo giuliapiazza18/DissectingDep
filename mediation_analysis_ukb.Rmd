@@ -1,0 +1,1124 @@
+---
+title: "Dissecting Depression Symptomatology: Brain Phenotypes as Mediators Between Polygenic Scores and Individual Symptoms in the UK Biobank"
+author: "Giulia Piazza"
+date: "2025-01-16"
+output:
+    html_document:
+    df_print: paged
+    toc: true
+    toc_float: true
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, eval = FALSE, message = FALSE, warning = FALSE, cache = TRUE)
+system("dx download /output/mediation/markdown/mediation_analysis_ukb.RData")
+load("~/mediation_analysis_ukb.RData")
+```
+
+# Data cleaning
+
+## Load data on the RAP
+
+```{r message=FALSE, warning=FALSE}
+system('dx download "/output/pgs/DEP_05June2024/DEP_pred_auto.txt"')
+system('dx download "/output/pgs/ADHD_17June2024/ADHD_pred_auto.txt"')
+system('dx download "/output/pgs/SCZ_26July2024/SCZ_pred_auto.txt"')
+system('dx download "/output/pgs/BD_26July2024/BD_pred_auto.txt"')
+system('dx download "/data/brain_data.csv"')
+system('dx download "/data/demo_pheno_data.csv"')
+system("dx download /scripts/mediation/functions/make_multiple_model_cov.R")
+system("dx download /scripts/mediation/functions/single_model.R")
+system("dx download /scripts/mediation/functions/adjust_multiple_df.R")
+system("dx download /scripts/mediation/functions/create_single_label.R")
+system("dx download /scripts/mediation/functions/split_data.R")
+system("dx download /scripts/mediation/functions/create_path_label.R")
+system("dx download /scripts/mediation/functions/create_path_label_tot.R")
+system("dx download /output/merged/qc/imputed.allchr.hapmap.subset.QC.pruned.pca.eigenvec")
+
+source("make_multiple_model_cov.R") # function to create model
+source("adjust_multiple_df.R") # function to adjust data frame for plots and multiple comparisons
+source("single_model.R")
+source("split_data.R")
+source("create_path_label.R")
+source("create_single_label.R")
+source("create_path_label_tot.R")
+```
+
+## Install packages and load
+
+```{r, message=FALSE, warning=FALSE}
+install.packages(c("lavaan", "psych", "corrplot", "corpcor", "mice", "naniar", "miceadds"), repos = "http://cran.us.r-project.org")
+
+remotes::install_github("TDJorgensen/lavaan.mi")
+devtools::install_github("slowkow/ggrepel")
+
+```
+
+```{r, eval=TRUE, message=FALSE, warning=FALSE}
+
+library(dplyr)
+library(lavaan)
+library(psych)
+library(corpcor)
+library(ggplot2)
+library(corrplot)
+library(naniar)
+library(mice)
+library(lavaan.mi)
+library(ggrepel)
+library(miceadds)
+library(forcats)
+```
+
+## Load data in R
+
+```{r}
+dep_pgs = read.table("DEP_pred_auto.txt", header = TRUE) %>%
+  dplyr::select(sample.ID, final_pred_auto) %>% rename(., dep.pgs = final_pred_auto)
+adhd_pgs = read.table("ADHD_pred_auto.txt", header = TRUE) %>%
+  dplyr::select(sample.ID, final_pred_auto)  %>% rename(., adhd.pgs = final_pred_auto)
+scz_pgs = read.table("SCZ_pred_auto.txt", header = TRUE) %>%
+  dplyr::select(sample.ID, final_pred_auto)  %>% rename(., scz.pgs = final_pred_auto)
+bd_pgs = read.table("BD_pred_auto.txt", header = TRUE) %>%
+  dplyr::select(sample.ID, final_pred_auto)  %>% rename(., bd.pgs = final_pred_auto)
+
+pheno_data = read.csv("demo_pheno_data.csv")
+brain_data = read.csv("brain_data.csv")
+
+```
+
+## Keep individuals with polygenic scores
+
+```{r}
+data.pgs = merge(dep_pgs, pheno_data, by.x = "sample.ID", by.y = "Participant.ID", all.x = TRUE) %>%
+  merge(., brain_data, by.x = "sample.ID", by.y = "Participant.ID", all.x = T) %>% 
+  merge(., adhd_pgs, by = "sample.ID", all.x = T) %>%
+  merge(., scz_pgs, by = "sample.ID", all.x = T) %>%
+  merge(., bd_pgs, by = "sample.ID", all.x = T)
+```
+
+## Select and rename variables for mediation
+
+```{r}
+data.med = data.pgs %>%
+  rename(
+    id = sample.ID,
+    age = Age.at.recruitment,
+    dep.pgs = dep.pgs,
+    adhd.pgs = adhd.pgs,
+    scz.pgs = scz.pgs,
+    bd.pgs = bd.pgs,
+    tow = Townsend.deprivation.index.at.recruitment,
+    sex = Sex,
+    yob = Year.of.birth,
+    mob = Month.of.birth,
+    emp = Current.employment.status...Instance.2,
+    qual = Qualifications...Instance.2,
+    eth = Ethnic.background...Instance.2,
+    anx = Recent.feelings.or.nervousness.or.anxiety,
+    wor = Recent.inability.to.stop.or.control.worrying,
+    psy = Recent.changes.in.speed.amount.of.moving.or.speaking,
+    dep = Recent.feelings.of.depression,
+    ina = Recent.feelings.of.inadequacy,
+    tir = Recent.feelings.of.tiredness.or.low.energy,
+    int = Recent.lack.of.interest.or.pleasure.in.doing.things,
+    app = Recent.poor.appetite.or.overeating,
+    sui = Recent.thoughts.of.suicide.or.self.harm,
+    con = Recent.trouble.concentrating.on.things,
+    sle = Trouble.falling.or.staying.asleep..or.sleeping.too.much,
+    irr = Recent.easy.annoyance.or.irritability,
+    fore = Recent.feelings.of.foreboding,
+    res = Recent.restlessness,
+    rel = Recent.trouble.relaxing,
+    wor.t = Recent.worrying.too.much.about.different.things,
+    mofc.left = Volume.of.medialorbitofrontal..left.hemisphere....Instance.2,
+    mofc.right = Volume.of.medialorbitofrontal..right.hemisphere....Instance.2,
+    fusi.left = Volume.of.fusiform..left.hemisphere....Instance.2,
+    fusi.right = Volume.of.fusiform..right.hemisphere....Instance.2,
+    ins.left = Volume.of.insula..left.hemisphere....Instance.2,
+    ins.right = Volume.of.insula..right.hemisphere....Instance.2,
+    ra.cing.right = Volume.of.rostralanteriorcingulate..right.hemisphere....Instance.2,
+    ra.cing.left = Volume.of.rostralanteriorcingulate..left.hemisphere....Instance.2,
+    p.cing.right = Volume.of.posteriorcingulate..right.hemisphere....Instance.2,
+    p.cing.left = Volume.of.posteriorcingulate..left.hemisphere....Instance.2,
+    ca.cing.right = Volume.of.caudalanteriorcingulate..right.hemisphere....Instance.2,
+    ca.cing.left = Volume.of.caudalanteriorcingulate..left.hemisphere....Instance.2,
+    hip.right = Volume.of.Hippocampus..right.hemisphere....Instance.2,
+    hip.left = Volume.of.Hippocampus..left.hemisphere....Instance.2,
+    tot.vol=Volume.of.brain..grey.white.matter..normalised.for.head.size....Instance.2) %>%
+  dplyr::select(id, age, sex, yob, mob, emp, tow, qual, eth, dep.pgs, adhd.pgs,
+         scz.pgs, bd.pgs, anx, wor, psy:wor.t, mofc.left:hip.right)
+
+```
+
+## Keep the cases with neuroimaging data
+
+```{r}
+data.med %>% dplyr::select(mofc.left:hip.left) %>% gg_miss_upset(nsets = 50) # looks like if they are missing one IDP, they are missing all IDPs
+
+data.med = data.med[complete.cases(data.med$mofc.left),]
+```
+
+## Recode data
+
+```{r}
+# data coding info is here https://biobank.ctsu.ox.ac.uk/crystal/coding.cgi?id=168
+
+data.reco = data.med %>%
+  mutate_at(vars(anx:wor.t), ~recode(., `0` = "0", `1`= "1", `2`= "2", `3`= "3", .default = NA_character_)) %>%
+  mutate_at(vars(anx:wor.t), as.numeric) # -3 (prefer not to answer) is now NA
+```
+
+## Combine Imaging Derived Phenotypes across hemispheres
+
+```{r}
+data.reco.brain = data.reco %>%
+  rowwise() %>%
+  mutate(mofc = mean(c(mofc.left, mofc.right))) %>%
+  mutate(fusi = mean(c(fusi.right, fusi.left))) %>%
+  mutate(ins = mean(c(ins.right, ins.left))) %>%
+  mutate(hip = mean(c(hip.right, hip.left))) %>%
+  mutate(cing = mean(c(ca.cing.right, ca.cing.left, ra.cing.left, ra.cing.right)))
+```
+
+## Scale brain data and PGS
+
+```{r}
+# (need to learn a better way to do this)
+data.scale = data.reco.brain
+data.scale$mofc = scale(data.scale$mofc)[,1]
+data.scale$hip = scale(data.scale$hip)[,1]
+data.scale$fusi = scale(data.scale$fusi)[,1]
+data.scale$ins = scale(data.scale$ins)[,1]
+data.scale$cing = scale(data.scale$cing)[,1]
+data.scale$dep.pgs = scale(data.scale$dep.pgs)[,1]
+data.scale$adhd.pgs = scale(data.scale$adhd.pgs)[,1]
+data.scale$scz.pgs = scale(data.scale$scz.pgs)[,1]
+data.scale$bd.pgs = scale(data.scale$bd.pgs)[,1]
+```
+
+## Add genetic principal components
+
+```{r}
+princ.comp = read.table("imputed.allchr.hapmap.subset.QC.pruned.pca.eigenvec")
+names(princ.comp) = c("IID", "FAM", paste0("PC", c(1:10)))
+
+# Add updated ethnicity and check we're only including Caucasian participants
+# data.cov = merge(data.scale, updated.eth, by = "id", all.x = TRUE) # all Caucasian
+
+
+# Add 10 principal components
+data.scale.pc = merge(data.scale, princ.comp, by.x = "id", by.y = "IID")
+```
+
+## Describe dataset
+
+```{r paged.print=TRUE, eval=TRUE}
+sum.data.scale = data.scale.pc %>%
+  rowwise() %>%
+  mutate(tot.anx = sum(c(anx, wor, wor.t, rel, res, irr, fore)),
+         tot.dep = sum(c(psy, dep, ina, tir, int, app, sui, con, sle))) %>%
+  psych::describe()
+sum.data.scale.vis = as.data.frame(lapply(sum.data.scale, round, digits = 2))
+rownames(sum.data.scale.vis) = rownames(sum.data.scale)
+sum.data.scale.vis
+table(data.scale.pc$sex) # 0 = female, 1 = male
+
+
+```
+
+## Save dataset
+
+```{r}
+write.csv(data.scale.pc,"data.scale.pc.csv", quote = F, row.names = F)
+```
+
+## Explore correlations
+
+```{r}
+data.cor = data.scale.pc %>% dplyr::select(id, dep.pgs:wor.t, mofc:cing, sex, age, "PC1":"PC10")
+
+cor_all = cor(data.cor[-1], use = "p")
+pcor_all = cor2pcor(cor_all)
+colnames(pcor_all) = colnames(cor_all)
+rownames(pcor_all) = rownames(cor_all)
+
+
+```
+
+### Partial correlations (everything)
+```{r eval=TRUE, fig.height=8, fig.width=8}
+pcor_plot = corrplot(pcor_all, col = COL2('PuOr'), type = "upper", method = "shade", diag = FALSE)
+
+```
+
+
+## Explore missing data
+
+```{r, eval=TRUE}
+# percent missing in variables, per case etc 
+miss.var = miss_var_summary(data.cor)
+cat("The maximum percentage of missing values across variables is",
+  max(miss.var$pct_miss)
+  )
+miss.case = miss_case_table(data.cor)
+cat("The maximum percentage of missing values across cases is",
+  miss.case %>% filter(n_miss_in_case > 0) %>% dplyr::select(pct_cases) %>% max()
+)
+
+data.cor %>% dplyr::select(anx:rel) %>% gg_miss_var()
+```
+
+## Multiple imputation
+
+### Prepare data frame for model (function needs specific names)
+
+```{r}
+
+NO = data.cor %>% dplyr::select(anx:wor.t) %>% colnames() %>% length() # number of outcomes
+NM = data.cor %>% dplyr::select(mofc:cing) %>% colnames() %>% length() # number of mediators
+NE = data.cor %>% dplyr::select(dep.pgs:bd.pgs) %>% colnames() %>% length() # number of exposures
+NCV = data.cor %>% dplyr::select(age, sex, "PC1":"PC10") %>% colnames() %>% length() # number of covariates
+
+model_names = c("id",
+                paste0("E", 1:NE),
+                paste0("O", 1:NO),
+                paste0("M", 1:NM),
+                paste0("CV", 1:NCV))
+
+names(model_names) = names(data.cor)
+
+data.lav = data.cor
+names(data.lav) = model_names 
+
+```
+
+
+### Impute data
+
+```{r}
+data.imputed = mice(data.lav,
+                    m = 25, 
+                    method = "pmm",
+                    printFlag = FALSE)
+```
+
+# Mediation analysis
+
+## Create multiple PGS model
+
+```{r, eval=TRUE}
+mediation.model = make_multiple_model_cov(NO, NE, NM, NCV)
+mediation.model
+```
+
+### Apply model to imputed data sets
+
+```{r}
+
+mult.pgs.fit <- sem.mi(model = mediation.model, data = data.imputed, ordered = c(paste0("O", 1:NO)), 
+                        se = "robust", missing = "pairwise", parallel = "multicore", ncpus = 8)
+
+```
+
+### Extract and save parameters
+
+```{r}
+
+mult.pgs.par = parameterEstimates.mi(mult.pgs.fit)
+
+```
+
+### Save standardised solution
+
+```{r}
+mult.pgs.std = standardizedSolution.mi(mult.pgs.fit)
+
+```
+
+### Control for multiple comparisons
+
+```{r}
+mult.pgs.df = adjust_multiple_df(mult.pgs.std)
+
+sig.paths.std = mult.pgs.df %>% filter(pvalue.adj < 0.05)
+
+```
+
+## Single PGS model
+
+### Depression
+
+```{r}
+single.pgs.dep = single_model(data.lav, data.imputed, "dep.pgs", NO, NM, NCV)
+```
+
+### Schizophrenia
+
+```{r}
+single.pgs.scz = single_model(data.lav, data.imputed, "scz.pgs", NO, NM, NCV)
+```
+
+### Bipolar Disoder
+
+```{r}
+single.pgs.bd = single_model(data.lav, data.imputed, "bd.pgs", NO, NM, NCV)
+```
+
+### ADHD
+
+```{r}
+single.pgs.adhd = single_model(data.lav, data.imputed, "adhd.pgs", NO, NM, NCV)
+```
+
+
+## Total scores model
+
+### Create sum scores on imputed data
+```{r}
+imp.tot <- data.frame(complete(data.imputed, include = TRUE, action = "long"))
+imp.tot = imp.tot %>%
+  rowwise() %>%
+  mutate(tot.anx = sum(c(O1, O2, O16, O14, O15, O12, O13)),
+         tot.dep = sum(c(O3, O4, O5, O6, O7, O8, O9, O10, O11)))
+imp.tot <- as.mids(imp.tot)
+```
+
+### Demographics, means, sds on imputed data
+
+```{r}
+imp.long = complete(imp.tot,action="long",include = FALSE)
+
+columns_of_interest <- setdiff(names(imp.long), ".imp")  
+
+pool_results <- list()
+
+for (col_name in columns_of_interest) {
+  pool_mean <- with(imp.long, by(imp.long, .imp, function(x) {
+    c(mean = mean(x[[col_name]], na.rm = TRUE), sd = sd(x[[col_name]], na.rm = TRUE))
+  }))
+  
+  pool_results[[col_name]] <- Reduce("+", pool_mean) / length(pool_mean)
+}
+
+
+pool_data <- list()
+
+
+for (col_name in names(pool_results)) {
+  
+  pool_data[[col_name]] <- data.frame(
+    Column = col_name, 
+    Mean = pool_results[[col_name]][1],  # Mean
+    SD = pool_results[[col_name]][2]     # Standard deviation
+  )
+}
+
+pool_df <- do.call(rbind, pool_data)
+
+pool_df_round = as.data.frame(lapply(pool_df[-1], round, digits = 2))
+rownames(pool_df_round) = rownames(pool_df)
+pool_df_round
+model_names_df <- data.frame(Column = names(model_names), Description = model_names, stringsAsFactors = FALSE)
+pool_df_round_names = merge(pool_df_round, model_names_df, by.x = "row.names", by.y = "Description") %>% select(Column, Mean, SD)
+
+pool_df_round_names
+
+```
+
+
+### Create model
+```{r}
+tot.model = make_multiple_model_cov(NO = 1, NE, NM, NCV)
+
+tot.model.dep =  gsub("O1", "tot.dep", tot.model)
+tot.model.anx =  gsub("O1", "tot.anx", tot.model)
+```
+
+### Apply model 
+```{r}
+tot.dep.fit <- sem.mi(model = tot.model.dep, data = imp.tot, se = "robust")
+
+tot.anx.fit <- sem.mi(model = tot.model.anx, data = imp.tot, se = "robust")
+
+```
+
+### Save standardised solution
+
+```{r}
+tot.dep.std = standardizedSolution.mi(tot.dep.fit)
+tot.anx.std = standardizedSolution.mi(tot.anx.fit)
+
+```
+
+### Control for multiple comparisons
+
+```{r}
+tot.dep.df = adjust_multiple_df(tot.dep.std)
+
+tot.anx.df = adjust_multiple_df(tot.anx.std)
+```
+
+
+# Plot estimates
+
+## Prepare results for plotting
+
+```{r}
+# Create path for single and multiple pgs
+
+multi.pgs = mult.pgs.df
+multi.pgs$model = "multiple"
+multi.pgs = create_path_label(multi.pgs, multi.pgs$label)
+
+
+# Merge single PGS solutions
+single.pgs.list = list("dep" = create_single_label(single.pgs.dep$adjusted.solution, single.pgs.dep$adjusted.solution$label, "dep.pgs"),
+                     "adhd" = create_single_label(single.pgs.adhd$adjusted.solution, single.pgs.adhd$adjusted.solution$label, "adhd.pgs"),
+                     "bd" = create_single_label(single.pgs.bd$adjusted.solution, single.pgs.bd$adjusted.solution$label, "bd.pgs"),
+                     "scz" = create_single_label(single.pgs.scz$adjusted.solution, single.pgs.scz$adjusted.solution$label, "scz.pgs"))
+
+df_list_named <- Map(function(df, name) {
+  df$model <- name
+  return(df)
+}, single.pgs.list, names(single.pgs.list))
+
+# Combine the dfs into one
+single.pgs <- bind_rows(df_list_named)
+
+
+# Merge single and multiple pgs
+
+single.pgs = single.pgs %>% select(est.std, se, ci.lower, ci.upper, type, pvalue, pvalue.adj, type.label, model, prefix, suffix)
+multi.pgs = multi.pgs %>% select(est.std, se, ci.lower, ci.upper, type, pvalue, pvalue.adj, type.label, model, prefix, suffix)
+
+mediation.pgs = rbind(single.pgs, multi.pgs)
+
+mediation.pgs$sig = ifelse(mediation.pgs$pvalue.adj < 0.05, 1, 0.2)
+mediation.pgs$model = ifelse(mediation.pgs$model == "multiple", "multiple", "single")
+
+
+```
+
+## Plot results
+
+### Total effects, single and multiple PGS models
+
+```{r eval=TRUE, fig.height=8, fig.width=10}
+(plot_ct = mediation.pgs %>%
+  filter(type %in% c("t")) %>%
+  ggplot(
+    .,
+    aes(
+      y = factor(suffix),
+      x = est.std,
+      xmin = ci.lower,
+      xmax = ci.upper,
+      color = model,
+      alpha = sig
+    )
+  ) +
+  geom_point(size = 2, position = position_dodge(width = 0.8)) +
+  geom_errorbarh(height = 0.6, position = position_dodge(width = 0.8)) +
+  facet_wrap( ~ prefix, nrow = 1, labeller = labeller(
+    prefix = c(
+      `adhd.pgs` = "ADHD PGS",
+      `bd.pgs` = "Bipolar PGS",
+      `dep.pgs` = "Depression PGS",
+      `scz.pgs` = "Schizophrenia PGS"
+    )
+  )) +
+  scale_alpha_identity() +
+  theme_classic() +
+  ylab("") +
+  xlab("Standardised estimate of total effect") +
+  theme(legend.position = "bottom") +
+  geom_vline(xintercept = 0, alpha = 0.2) +
+  scale_color_manual(
+    name = "Model",
+    values = c("#E69F00", "black"),
+    labels = c("Multiple PGS", "Single PGS")
+  ) +
+  scale_y_discrete(labels=c("anx" = "Anxious",
+                            "wor" = "Can't control worry",
+                            "psy" = "Psychomotor issues",
+                            "dep" = "Depressed",
+                            "ina" = "Feeling inadequate",
+                            "tir" = "Tired",
+                            "int" = "Lack of interest",
+                            "app" = "Appetite problems",
+                            "sui" = "Suicidal thoughts",
+                            "con" = "Concentration issues",
+                            "sle" = "Sleep issues",
+                            "irr" = "Irritable",
+                            "fore" = "Sense of foreboding",
+                            "res" = "Restless",
+                            "rel" = "Trouble relaxing",
+                            "wor.t" = "Worrying too much")))
+ 
+
+```
+
+### Total paths and unmediated paths comparisons
+
+```{r, eval=TRUE, fig.width=8.5, fig.height=8}
+c_paths = mediation.pgs %>%
+  filter(type == c("c") & model == "multiple") %>%
+  select(est.std, type, type.label)
+
+t_paths = mediation.pgs %>%
+  filter(type == c("t") & model == "multiple")%>%
+  select(est.std, type, type.label)
+
+
+ct_paths = merge(c_paths, t_paths, by = "type.label") %>%
+  select(type.label, est.std.x, est.std.y)
+colnames(ct_paths) = c("type.label", "c", "t")
+
+ct_paths$Difference = ct_paths$t - ct_paths$c
+
+
+(
+  deviation_plot = ggplot(ct_paths, aes(
+    x = t, y = c, colour = Difference
+  )) +
+    geom_point(size = 2) +
+    geom_abline() +
+    ylab("Standardised estimate of unmediated paths") +
+    xlab("Standardised estimate of total paths") +
+    theme_minimal() +
+    geom_label_repel(
+      color = "black",
+      size = 3,
+      data = filter(ct_paths, Difference > 0.004),
+      min.segment.length = 0,
+      seed = 42,
+      box.padding = 0.5 ,
+      nudge_x = 0.009,
+     aes(
+        color = "black",
+        label = c("ADHD PGS - Appetite",
+                  "ADHD PGS - Lack of interest", 
+                  "ADHD PGS - Psychomotor issues",
+                  "ADHD PGS - Restlessness",
+                  "ADHD PGS - Suicidal thoughts", 
+                  "ADHD PGS - Tiredness")
+      )
+    )
+)
+
+
+
+```
+
+### PGS-mediator associations, single and multiple PGS models
+
+```{r eval=TRUE, fig.height=5, fig.width=11}
+(plot_a = mediation.pgs %>%
+  filter(type %in% c("a")) %>%
+  ggplot(
+    .,
+    aes(
+      y = factor(suffix),
+      x = est.std,
+      xmin = ci.lower,
+      xmax = ci.upper,
+      color = model,
+      alpha = sig
+    )
+  ) +
+  geom_point(size = 2, position = position_dodge(width = 0.8)) +
+  geom_errorbarh(height = 0.6, position = position_dodge(width = 0.8)) +
+  facet_wrap( ~ prefix, nrow = 1, labeller = labeller(
+    prefix = c(
+      `adhd.pgs` = "ADHD PGS",
+      `bd.pgs` = "Bipolar PGS",
+      `dep.pgs` = "Depression PGS",
+      `scz.pgs` = "Schizophrenia PGS"
+    )
+  )) +
+  scale_alpha_identity() +
+  theme_classic() +
+   ylab("") +
+  xlab("Standardised estimate") +
+   scale_x_continuous(breaks = c(-0.075, -0.050, -0.025, 0, 0.025, 0.045)) +
+  theme(legend.position = "bottom") +
+  geom_vline(xintercept = 0, alpha = 0.2) +
+  scale_color_manual(
+    name = "Model",
+    values = c("#3399CC", "black"),
+    labels = c("Multiple PGS", "Single PGS")
+  )  +
+  scale_y_discrete(labels=c(`cing` = "Cingulate",
+      `fusi` = "Fusiform",
+      `hip` = "Hippocampus",
+      `ins` = "Insula",
+      `mofc` = "mOFC")) +
+  theme(legend.position = "bottom", 
+        axis.text.y=element_text(size=14), 
+        strip.text.x = element_text(size = 14), 
+        legend.title = element_text(size=14),
+        legend.text = element_text(size = 12),
+        axis.title.x = element_text(size = 14)))
+ 
+```
+
+### Mediator-outcome associations
+
+
+```{r}
+res.mi.cor <- micombine.cor(mi.res=data.imputed)
+res.mi.pcor <-micombine.cor(mi.res=data.imputed, partial = ~CV1 + CV2)
+
+cor.subset = res.mi.cor %>% filter(variable1 %in% c("O1", "O2", "O3", "O4", "O5", "O6", "O7", "O8", "O9", "O10", "O11", "O12", "O13", "O14", "O15", "O16")) %>%
+  filter(variable2 %in% c("M1", "M2", 'M3', "M4", "M5")) %>%
+  select(variable1, variable2, r, p, lower95, upper95)
+
+cor.subset$pavlue.adj = p.adjust(cor.subset$p, method = "fdr")
+
+pcor.subset = res.mi.pcor %>% filter(variable1 %in% c("O1", "O2", "O3", "O4", "O5", "O6", "O7", "O8", "O9", "O10", "O11", "O12", "O13", "O14", "O15", "O16")) %>%
+  filter(variable2 %in% c("M1", "M2", 'M3', "M4", "M5")) %>%
+  select(variable1, variable2, r, p, lower95, upper95)
+
+pcor.subset$pavlue.adj = p.adjust(pcor.subset$p, method = "fdr")
+
+cor.subset = cor.subset %>% mutate(variable1 = recode(variable1,
+                                   "O1" = "anx",
+                                   "O2" = "wor",
+                                   "O3" = "psy",
+                                   "O4" = "dep",
+                                   "O5" = "ina",
+                                   "O6" = "tir",
+                                   "O7" = "int",
+                                   "O8" = "app",
+                                   "O9" = "sui",
+                                   "O10" = "con",
+                                   "O11" = "sle",
+                                   "O12" = "irr",
+                                   "O13" = "fore",
+                                   "O14" = "res",
+                                   "O15" = "rel",
+                                   "O16" = "wor.t"),
+                                   variable2 = recode(variable2,
+                                    "M1" = "mofc",
+                                    "M2" = "fusi",
+                                    "M3" = "ins",
+                                    "M4" = "hip",
+                                    "M5" = "cing")) 
+
+pcor.subset = pcor.subset %>% mutate(variable1 = recode(variable1,
+                                   "O1" = "anx",
+                                   "O2" = "wor",
+                                   "O3" = "psy",
+                                   "O4" = "dep",
+                                   "O5" = "ina",
+                                   "O6" = "tir",
+                                   "O7" = "int",
+                                   "O8" = "app",
+                                   "O9" = "sui",
+                                   "O10" = "con",
+                                   "O11" = "sle",
+                                   "O12" = "irr",
+                                   "O13" = "fore",
+                                   "O14" = "res",
+                                   "O15" = "rel",
+                                   "O16" = "wor.t"),
+                                   variable2 = recode(variable2,
+                                    "M1" = "mofc",
+                                    "M2" = "fusi",
+                                    "M3" = "ins",
+                                    "M4" = "hip",
+                                    "M5" = "cing")) %>% select(-p)
+
+
+
+cor.subset$type.label = paste0(cor.subset$variable1, " - ", cor.subset$variable2)
+cor.subset$model = "simple" 
+
+pcor.subset$type.label = paste0(pcor.subset$variable1, " - ", pcor.subset$variable2)
+pcor.subset$model = "partial (sex and age)" 
+
+
+b_paths_multiple = mediation.pgs %>% filter(type == "b" & model == "multiple") %>% select(-c(type, se, sig))
+colnames(b_paths_multiple) = c("r", "lower95", "upper95", "pvalue", "pavlue.adj", "type.label", "model", "variable2", "variable1")
+
+b_paths_comp = rbind(cor.subset, pcor.subset, b_paths_multiple)
+b_paths_comp$sig = ifelse(b_paths_comp$pavlue.adj < 0.05, 1, 0.3)
+```
+
+
+
+
+
+
+```{r, fig.height=10, fig.width=12, eval=TRUE}
+(b_comp_plot = b_paths_comp %>%
+   filter(model != "partial (sex and age)") %>%
+ggplot(.,
+  aes(
+    y = factor(variable1),
+    x = r,
+    xmin = lower95,
+    xmax = upper95,
+    color = model,
+    alpha = sig
+  )
+) +
+  facet_wrap( ~ variable2, nrow = 1, labeller = labeller(
+    variable2 = c(
+      `fusi` = "Fusiform",
+      `ins` = "Insula",
+      `hip` = "Hippocampus",
+      `mofc` = "mOFC",
+      `cing` = "Cingulate" 
+    ))
+  ) +
+  geom_point(size = 2, position = position_dodge(width = 0.8)) +
+  geom_errorbarh(height = 0.6, position = position_dodge(width = 0.8)) +
+    theme_classic() +
+  geom_vline(xintercept = 0, alpha = 0.2) +
+  scale_y_discrete(labels=c("anx" = "Anxious",
+                            "wor" = "Can't control worry",
+                            "psy" = "Psychomotor issues",
+                            "dep" = "Depressed",
+                            "ina" = "Feeling inadequate",
+                            "tir" = "Tired",
+                            "int" = "Lack of interest",
+                            "app" = "Appetite problems",
+                            "sui" = "Suicidal thoughts",
+                            "con" = "Concentration issues",
+                            "sle" = "Sleep issues",
+                            "irr" = "Irritable",
+                            "fore" = "Sense of foreboding",
+                            "res" = "Restless",
+                            "rel" = "Trouble relaxing",
+                            "wor.t" = "Worrying too much")) +
+  scale_color_manual(
+    name = "Estimate type",
+    values = c("brown", "darkgreen"),
+    labels = c("Multiple PGS mediation model", "Simple")
+  ) +
+  scale_alpha_identity() +
+  xlab("Estimate") +
+  ylab("") +
+  theme(legend.position = "bottom", 
+        axis.text.y=element_text(size=14), 
+        strip.text.x = element_text(size = 14), 
+        legend.title = element_text(size=14),
+        legend.text = element_text(size = 12),
+        axis.title.x = element_text(size = 14)))
+
+```
+
+### Total mediation effects, single and multiple PGS models
+
+```{r eval=TRUE, fig.height=8, fig.width=11}
+(plot_mtot = mediation.pgs %>%
+  filter(type == "m tot") %>%
+  ggplot(
+    .,
+    aes(
+      y = factor(suffix),
+      x = est.std,
+      xmin = ci.lower,
+      xmax = ci.upper,
+      color = model,
+      alpha = sig
+    )
+  ) +
+  geom_point(size = 2, position = position_dodge(width = 0.8)) +
+  geom_errorbarh(height = 0.6, position = position_dodge(width = 0.8)) +
+  facet_wrap( ~ prefix, nrow = 1, labeller = labeller(
+    prefix = c(
+      `adhd.pgs` = "ADHD PGS",
+      `bd.pgs` = "Bipolar PGS",
+      `dep.pgs` = "Depression PGS",
+      `scz.pgs` = "Schizophrenia PGS"
+    )
+  )) +
+  theme_classic() +
+  xlab("Standardised estimate") +
+   ylab("") +
+  theme(legend.position = "bottom") +
+  geom_vline(xintercept = 0, alpha = 0.2) +
+  scale_color_manual(
+    name = "Model",
+    values = c("lightcoral", "black"),
+    labels = c("Multiple PGS", "Single PGS")
+  ) +
+  scale_alpha_identity() +
+  scale_y_discrete(labels=c("anx" = "Anxious",
+                            "wor" = "Can't control worry",
+                            "psy" = "Psychomotor issues",
+                            "dep" = "Depressed",
+                            "ina" = "Feeling inadequate",
+                            "tir" = "Tired",
+                            "int" = "Lack of interest",
+                            "app" = "Appetite problems",
+                            "sui" = "Suicidal thoughts",
+                            "con" = "Concentration issues",
+                            "sle" = "Sleep issues",
+                            "irr" = "Irritable",
+                            "fore" = "Sense of foreboding",
+                            "res" = "Restless",
+                            "rel" = "Trouble relaxing",
+                            "wor.t" = "Worrying too much")))
+```
+
+### Significant individual mediation effects, single and multiple PGS models
+
+```{r, eval=TRUE}
+# No significant individual mediation effects
+
+mediation.pgs %>%
+  filter(type == "m" & pvalue.adj < 0.05) 
+```
+
+
+### Sum scores results
+
+```{r}
+tot.dep.pgs = create_path_label_tot(tot.dep.df, tot.dep.df$label)
+tot.anx.pgs = create_path_label_tot(tot.anx.df, tot.anx.df$label)
+
+
+tot.dep = tot.dep.pgs %>% filter(suffix == "total") %>% select(est.std, ci.lower, ci.upper, pvalue, pvalue.adj, prefix, suffix, type)
+tot.anx = tot.anx.pgs %>% filter(suffix == "total") %>% select(est.std, ci.lower, ci.upper, pvalue, pvalue.adj, prefix, suffix, type)
+
+tot.dep$suffix = "tot.dep"
+tot.anx$suffix = "tot.anx"
+
+tot.est = rbind(tot.dep, tot.anx)
+
+tot.est = tot.est %>% mutate(prefix = recode(prefix,
+                                   "mofc" = "mOFC",
+                                   "fusi" = "Fusiform",
+                                   "ins" = "Insula",
+                                   "hip" = "Hippocampus",
+                                   "cing" = "Cingulate",
+                                   "dep.pgs" = "Depression PGS",
+                                   "scz.pgs" = "Schizophrenia PGS",
+                                   "bd.pgs" = "Bipolar disorder PGS",
+                                   "adhd.pgs" = "ADHD PGS"),
+                                   suffix = recode(suffix,
+                                    "tot.dep" = "Total Depression",
+                                    "tot.anx" = "Total Anxiety"))
+
+tot.est$type.label = paste0(tot.est$prefix, " - ", tot.est$suffix)
+tot.est$sig = ifelse(tot.est$pvalue.adj < 0.05, 1, 0.2)
+```
+
+``` {r, fig.width=8, fig.height=5, eval=TRUE}
+tot_plot = tot.est %>%
+  filter(type != "m tot") %>%
+  mutate(type.label = fct_reorder(type.label, type)) %>% 
+  ggplot(
+    .,
+    aes(
+      y = type.label,
+      x = est.std,
+      xmin = ci.lower,
+      xmax = ci.upper,
+      color = factor(type),
+      alpha = sig
+    )
+  ) +
+  geom_point(size = 2, position = position_dodge(width = 0.8)) +
+  geom_errorbarh(height = 0.6, position = position_dodge(width = 0.8)) +
+  theme_classic() +
+  xlab("Standardised effect estimate") +
+  ylab("") +
+  geom_vline(xintercept = 0, alpha = 0.5)+
+  scale_color_manual(
+    name = "Path type",
+    values = c("brown", "orange", "darkgreen"),
+    labels = c("PGS-Brain mediator", "Unmediated effect", "Total effect")
+  ) +
+  scale_alpha_identity()
+tot_plot
+ 
+```
+
+# Print estimates and package versions for draft 
+
+```{r, include = FALSE}
+# Total effects ====
+## Single
+mediation.pgs %>% filter(model == "single" & pvalue.adj < 0.05 & type == "t" &
+                           prefix %in% c("dep.pgs", "adhd.pgs", "bd.pgs", "scz.pgs")) %>% 
+  summarize(min = round(min(est.std),3), minName = type.label[which.min(est.std)], 
+            max = round(max(est.std),3), maxName = type.label[which.max(est.std)],
+            pmin = round(pvalue.adj[which.min(est.std)],5), pmax = round(pvalue.adj[which.max(est.std)],5),
+            ci.upper.min = round(ci.upper[which.min(est.std)],3), ci.lower.min = round(ci.lower[which.min(est.std)],3),
+            ci.upper.max = round(ci.upper[which.max(est.std)],3), ci.lower.max = round(ci.lower[which.max(est.std)],3) )
+
+## Multiple
+mediation.pgs %>% filter(model == "multiple" & pvalue.adj < 0.05 & type == "t" &
+                           prefix %in% c("dep.pgs")) %>% 
+  summarize(min = round(min(est.std),3), minName = type.label[which.min(est.std)], 
+            max = round(max(est.std),3), maxName = type.label[which.max(est.std)],
+            pmin = round(pvalue.adj[which.min(est.std)],5), pmax = round(pvalue.adj[which.max(est.std)],5),
+            ci.upper.min = round(ci.upper[which.min(est.std)],3), ci.lower.min = round(ci.lower[which.min(est.std)],3),
+            ci.upper.max = round(ci.upper[which.max(est.std)],3), ci.lower.max = round(ci.lower[which.max(est.std)],3) )
+
+mediation.pgs %>% filter(model == "multiple" & pvalue.adj < 0.05 & type == "t" &
+                           prefix %in% c("adhd.pgs")) %>% 
+  summarize(min = round(min(est.std),3), minName = type.label[which.min(est.std)], 
+            max = round(max(est.std),3), maxName = type.label[which.max(est.std)],
+            pmin = round(pvalue.adj[which.min(est.std)],5), pmax = round(pvalue.adj[which.max(est.std)],5),
+            ci.upper.min = round(ci.upper[which.min(est.std)],3), ci.lower.min = round(ci.lower[which.min(est.std)],3),
+            ci.upper.max = round(ci.upper[which.max(est.std)],3), ci.lower.max = round(ci.lower[which.max(est.std)],3) )
+
+mediation.pgs %>% filter(model == "multiple" & pvalue.adj < 0.05 & type == "t" &
+                           prefix %in% c("scz.pgs")) %>% 
+  summarize(min = round(min(est.std),3), minName = type.label[which.min(est.std)], 
+            max = round(max(est.std),3), maxName = type.label[which.max(est.std)],
+            pmin = round(pvalue.adj[which.min(est.std)],5), pmax = round(pvalue.adj[which.max(est.std)],5),
+            ci.upper.min = round(ci.upper[which.min(est.std)],3), ci.lower.min = round(ci.lower[which.min(est.std)],3),
+            ci.upper.max = round(ci.upper[which.max(est.std)],3), ci.lower.max = round(ci.lower[which.max(est.std)],3) )
+
+tot.dep.pgs %>% filter(suffix == "total" & type == "t") %>% select(est.std, pvalue.adj, type.label, ci.lower, ci.upper) %>%
+  mutate(est = round(est.std,3),
+         p = round(pvalue.adj, 3),
+         ci.lower = round(ci.lower, 3),
+         ci.upper = round(ci.upper, 3))
+
+tot.anx.pgs %>% filter(suffix == "total" & type == "t") %>% select(est.std, pvalue.adj, type.label, ci.lower, ci.upper) %>%
+  mutate(est = round(est.std,3),
+         p = round(pvalue.adj, 3),
+         ci.lower = round(ci.lower, 3),
+         ci.upper = round(ci.upper, 3))
+
+# a paths ====
+mediation.pgs %>% filter(model == "single" & pvalue.adj < 0.05 & type == "a") %>%
+  summarize(min = round(min(est.std),3), minName = type.label[which.min(est.std)], 
+            max = round(max(est.std),3), maxName = type.label[which.max(est.std)],
+            pmin = round(pvalue.adj[which.min(est.std)],5), pmax = round(pvalue.adj[which.max(est.std)],5),
+            ci.upper.min = round(ci.upper[which.min(est.std)],3), ci.lower.min = round(ci.lower[which.min(est.std)],3),
+            ci.upper.max = round(ci.upper[which.max(est.std)],3), ci.lower.max = round(ci.lower[which.max(est.std)],3) )
+
+mediation.pgs %>% filter(model == "multiple" & pvalue.adj < 0.05 & type == "a" & prefix == "adhd.pgs") %>%
+  summarize(minName = type.label[which.min(est.std)], min = round(min(est.std),3),
+            ci.lower.min = round(ci.lower[which.min(est.std)],3), ci.upper.min = round(ci.upper[which.min(est.std)],3),
+            pmin = round(pvalue.adj[which.min(est.std)],5),
+            maxName = type.label[which.max(est.std)], max = round(max(est.std),3),
+            ci.lower.max = round(ci.lower[which.max(est.std)],3), ci.upper.max = round(ci.upper[which.max(est.std)],3),
+            ci.upper.max = round(ci.upper[which.max(est.std)],3), ci.lower.max = round(ci.lower[which.max(est.std)],3),
+            pmax = round(pvalue.adj[which.max(est.std)],5))
+
+mediation.pgs %>% filter(model == "multiple" & pvalue.adj < 0.05 & type == "a" & prefix == "scz.pgs") %>%
+  summarize(minName = type.label[which.min(est.std)], min = round(min(est.std),3),
+            ci.lower.min = round(ci.lower[which.min(est.std)],3), ci.upper.min = round(ci.upper[which.min(est.std)],3),
+            pmin = round(pvalue.adj[which.min(est.std)],5))
+
+
+mediation.pgs %>% filter(model == "multiple" & pvalue.adj < 0.05 & type == "a" & prefix == "bd.pgs") %>%
+  summarize(minName = type.label[which.min(est.std)], min = round(min(est.std),3),
+            ci.lower.min = round(ci.lower[which.min(est.std)],3), ci.upper.min = round(ci.upper[which.min(est.std)],3),
+            pmin = round(pvalue.adj[which.min(est.std)],5),
+            maxName = type.label[which.max(est.std)], max = round(max(est.std),3),
+            ci.lower.max = round(ci.lower[which.max(est.std)],3), ci.upper.max = round(ci.upper[which.max(est.std)],3),
+            ci.upper.max = round(ci.upper[which.max(est.std)],3), ci.lower.max = round(ci.lower[which.max(est.std)],3),
+            pmax = round(pvalue.adj[which.max(est.std)],5))
+
+# b paths ====
+b_paths_comp %>% filter(model == "multiple" & pavlue.adj < 0.05) %>%
+  summarize(minName = type.label[which.min(r)], min = round(min(r),3),
+            lower95.min = round(lower95[which.min(r)],3), upper95.min = round(upper95[which.min(r)],3),
+            pmin = round(pavlue.adj[which.min(r)],5),
+            maxName = type.label[which.max(r)], max = round(max(r),3),
+            lower95.max = round(lower95[which.max(r)],3), upper95.max = round(upper95[which.max(r)],3),
+            upper95.max = round(upper95[which.max(r)],3), lower95.max = round(lower95[which.max(r)],3),
+            pmax = round(pavlue.adj[which.max(r)],5))
+
+b_paths_comp %>% filter(model == "simple" & pavlue.adj < 0.05) %>%
+  summarize(minName = type.label[which.min(r)], min = round(min(r),3),
+            lower95.min = round(lower95[which.min(r)],3), upper95.min = round(upper95[which.min(r)],3),
+            pmin = round(pavlue.adj[which.min(r)],5),
+            maxName = type.label[which.max(r)], max = round(max(r),3),
+            lower95.max = round(lower95[which.max(r)],3), upper95.max = round(upper95[which.max(r)],3),
+            upper95.max = round(upper95[which.max(r)],3), lower95.max = round(lower95[which.max(r)],3),
+            pmax = round(pavlue.adj[which.max(r)],5))
+
+# Total mediation effect
+mediation.pgs %>% filter(model == "single" & pvalue.adj < 0.05 & type == "m tot") %>%
+  summarize(min = round(min(est.std),3), minName = type.label[which.min(est.std)], 
+            max = round(max(est.std),3), maxName = type.label[which.max(est.std)],
+            pmin = round(pvalue.adj[which.min(est.std)],5), pmax = round(pvalue.adj[which.max(est.std)],5),
+            ci.upper.min = round(ci.upper[which.min(est.std)],3), ci.lower.min = round(ci.lower[which.min(est.std)],3),
+            ci.upper.max = round(ci.upper[which.max(est.std)],3), ci.lower.max = round(ci.lower[which.max(est.std)],3) )
+
+ct_paths %>% summarize(minName = type.label[which.min(Difference)], min = round(min(Difference),3),
+                      maxName = type.label[which.max(Difference)], max = round(max(Difference),3))
+
+ct_paths %>% filter(Difference > 0.004) %>%
+  mutate(diff = round(Difference, 3))
+
+
+sessionInfo()
+```
+
+
+# Save files
+
+```{r, include = FALSE}
+write.csv(b_paths_comp, "b_paths_comp.csv", quote = F, row.names = F)
+write.csv(tot.dep.pgs, "tot.dep.pgs.csv", quote = F, row.names = F)
+write.csv(tot.anx.pgs, "tot.anx.pgs.csv", quote = F, row.names = F)
+write.csv(ct_paths, "ct_paths.csv", quote = F, row.names = F)
+write.csv(mediation.pgs, "mediation.pgs.csv", quote = F, row.names = F)
+write.csv(tot.est, "tot.est.csv", quote = F, row.names = F)
+write.csv(cor.subset, "supp.cor.csv", quote = F, row.names = F)
+
+pdf("plot_ct.pdf", width = 8, height = 6)
+plot_ct
+dev.off()
+
+pdf("deviation_plot.pdf", width=8, height=5)
+deviation_plot
+dev.off()
+
+pdf("plot_a.pdf",  height=5, width=13)
+plot_a
+dev.off()
+
+pdf("plot_b.pdf",  height=10, width=12)
+b_comp_plot
+dev.off()
+
+pdf("plot_mtot.pdf",  height=8, width=8)
+plot_mtot
+dev.off()
+
+pdf("plot_depanxtot.pdf",  height=5, width=8)
+tot_plot
+dev.off()
+
+
+save.image(file = "mediation_analysis_ukb.RData")
+
+system(paste0("dx upload mediation_analysis_ukb.RData",
+              " --destination /output/mediation/markdown/",
+              "mediation_analysis_ukb.RData"))
+
+system(paste0("dx upload mediation_analysis_ukb17122024-114527.Rmd",
+              " --destination /scripts/mediation/markdown/",
+              "mediation_analysis_ukb.Rmd"))
+
+system(paste0("dx upload mediation_analysis_ukb17122024-114527.html",
+              " --destination /scripts/mediation/markdown/",
+              "mediation_analysis_ukb.html"))
+
+system(paste0("dx upload mediation_analysis_ukb17122024-114527.md",
+              " --destination /scripts/mediation/markdown/",
+              "mediation_analysis_ukb.md"))
+
+system("dx upload plot_ct.pdf deviation_plot.pdf plot_a.pdf plot_b.pdf plot_mtot.pdf plot_depanxtot.pdf  --destination /scripts/mediation/temp/")
+
+system("dx upload b_paths_comp.csv tot.dep.pgs.csv tot.anx.pgs.csv ct_paths.csv mediation.pgs.csv --destination /scripts/mediation/temp/")
+
+system("dx upload mediation.pgs.csv --destination /output/mediation/markdown/")
+system("dx upload tot.est.csv --destination /output/mediation/markdown/")
+system("dx upload supp.cor.csv --destination /output/mediation/markdown/")
+
+```
